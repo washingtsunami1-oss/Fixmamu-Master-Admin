@@ -7,9 +7,28 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     
+    <style>
+        body { background-color: #000; color: #fff; font-family: sans-serif; font-style: italic; }
+        .italic-black { font-style: italic; font-weight: 900; text-transform: uppercase; }
+        
+        @keyframes alert-pulse {
+            0% { background-color: #111827; border-color: #374151; }
+            50% { background-color: #7f1d1d; border-color: #ef4444; box-shadow: 0 0 20px rgba(239, 68, 68, 0.4); }
+            100% { background-color: #111827; border-color: #374151; }
+        }
+        .overtime-alert { animation: alert-pulse 1.5s infinite !important; border-width: 2px !important; }
+        
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .glow-green { background: #10b981; box-shadow: 0 0 10px #10b981; animation: pulse-green 2s infinite; }
+        @keyframes pulse-green { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+
+        .tab-content { animation: fadeIn 0.3s ease; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    </style>
+
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/9.1.3/firebase-app.js";
-        import { getDatabase, ref, onValue, push, remove, update } from "https://www.gstatic.com/firebasejs/9.1.3/firebase-database.js";
+        import { getDatabase, ref, onValue, push, remove, update, set } from "https://www.gstatic.com/firebasejs/9.1.3/firebase-database.js";
 
         const firebaseConfig = { databaseURL: "https://fixmamu-97dd2-default-rtdb.firebaseio.com" };
         const app = initializeApp(firebaseConfig);
@@ -17,192 +36,231 @@
 
         const newOrderSound = new Audio('https://assets.mixkit.co/active_storage/sfx/1070/1070-preview.mp3');
         const statusUpdateSound = new Audio('https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3');
+        const overtimeSiren = new Audio('https://assets.mixkit.co/active_storage/sfx/995/995-preview.mp3');
         
         let lastOrderCount = -1;
         let lastStatusMap = {};
         let maamuArray = [];
+        let bookingsArray = []; 
+        let alertPlayedFor = new Set();
+
+        // --- 🌍 ZONES & SERVICES LIVE SYNC ---
+        onValue(ref(db, 'zones'), (snap) => {
+            let h = ""; 
+            snap.forEach((z) => {
+                h += `<div class="flex justify-between bg-black/40 p-3 rounded-xl mb-2 border border-white/5 text-[10px] uppercase font-bold italic">
+                        <span>${z.val().name}</span>
+                        <i onclick="deleteZone('${z.key}')" class="fa fa-trash text-red-900 cursor-pointer hover:text-red-600 transition-all"></i>
+                      </div>`;
+            });
+            if(document.getElementById('zoneList')) zoneList.innerHTML = h || "<p class='text-[8px] opacity-20 italic'>No Zones</p>";
+        });
+
+        onValue(ref(db, 'services'), (snap) => {
+            let h = ""; 
+            snap.forEach((s) => {
+                h += `<div class="flex justify-between bg-black/40 p-3 rounded-xl mb-2 border border-white/5 text-[10px] uppercase font-bold italic">
+                        <span>${s.val().name} (₹${s.val().price})</span>
+                        <i onclick="deleteService('${s.key}')" class="fa fa-trash text-red-900 cursor-pointer"></i>
+                      </div>`;
+            });
+            if(document.getElementById('serviceList')) serviceList.innerHTML = h || "<p class='text-[8px] opacity-20 italic'>No Services</p>";
+        });
+
+        // --- 📱 WHATSAPP DOUBLE COUNTRY CODE FIX ---
+        window.sendUserWA = (key, phone, name, amt) => {
+            let cleanPhone = phone.toString().replace(/\D/g, ''); 
+            if (cleanPhone.length > 10 && cleanPhone.startsWith('91')) {
+                cleanPhone = cleanPhone.slice(2);
+            }
+            const msg = `*ಕೆಲಸ ಮುಗಿದಿದೆ* ✅\n------------------\nನಮಸ್ಕಾರ *${name}* ಅವರೇ,\nನಿಮ್ಮ ಕೆಲಸ ಯಶಸ್ವಿಯಾಗಿ ಮುಗಿದಿದೆ.\n\n*ನೀವು ಪಾವತಿಸಿದ ಹಣ:* ರೂ.${amt}\n\nಧನ್ಯವಾದಗಳು!\n- ಫಿಕ್ಸ್ ಮಾಮು (Fix Maamu)`;
+            
+            update(ref(db, 'bookings/' + key), { msgSent: true }).then(() => { 
+                window.location.href = `whatsapp://send?phone=91${cleanPhone}&text=${encodeURIComponent(msg)}`; 
+            });
+        };
+
+        // --- 🛡️ USER BLACKLIST FIX ---
+        window.toggleUserBlock = () => {
+            const phone = userBlockPhone.value.trim();
+            if(!phone || phone.length < 10) return alert("ಸರಿಯಾದ ನಂಬರ್ ಹಾಕಿ!");
+            set(ref(db, 'blocked_users/' + phone), { phone: phone, blocked: true }).then(() => { 
+                alert("User Blocked!"); 
+                userBlockPhone.value = ""; 
+            });
+        };
+        window.unblockUser = (key) => {
+            if(confirm("Unblock ಮಾಡಬೇಕಾ?")) remove(ref(db, 'blocked_users/' + key));
+        };
+        onValue(ref(db, 'blocked_users'), snap => {
+            let h = ""; 
+            snap.forEach(c => { 
+                h += `<div class="flex justify-between bg-black/40 p-2 rounded-lg mb-1 border border-white/5 items-center">
+                        <span class="text-[10px] text-red-500 font-bold">${c.val().phone}</span>
+                        <button onclick="unblockUser('${c.key}')" class="text-[8px] text-green-500 font-black uppercase">Unblock</button>
+                      </div>`; 
+            });
+            blockedUserList.innerHTML = h || "<p class='text-[8px] opacity-20'>No Blocked Users</p>";
+        });
+
+        // --- ⏳ TIMERS & RADAR ---
+        window.runLiveTimer = (startTime, elementId) => {
+            setInterval(() => {
+                const el = document.getElementById(elementId);
+                if (!el) return;
+                const start = new Date(startTime).getTime();
+                const now = new Date().getTime();
+                const diff = now - start;
+                const h = Math.floor(diff / 3600000);
+                const m = Math.floor((diff % 3600000) / 60000);
+                const s = Math.floor((diff % 60000) / 1000);
+                el.innerText = `${h}h ${m}m ${s}s`;
+            }, 1000);
+        };
 
         window.openTab = (id) => {
             document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
             document.getElementById(id).classList.remove('hidden');
         };
 
-        // --- 1. MAAMU MANAGEMENT (Block/Unblock) ---
+        function refreshRadar() {
+            let radarH = {on:"", off:"", duty:"", blk:""};
+            maamuArray.forEach(m => {
+                const onWork = bookingsArray.some(b => b.assignedTo === m.name && !['Completed','Cancelled'].includes(b.status));
+                let status = m.blocked ? "blk" : (onWork ? "duty" : (m.duty === 'Online' ? "on" : "off"));
+                let dotColor = status === 'on' ? 'glow-green' : (status === 'duty' ? 'bg-blue-500' : (status === 'blk' ? 'bg-red-600' : 'bg-zinc-700'));
+                let item = `<div class="flex justify-between items-center bg-black/40 p-2 rounded-xl mb-1 border border-white/5 text-[9px] uppercase font-black italic"><span>${m.name}</span><span class="status-dot ${dotColor}"></span></div>`;
+                radarH[status] += item;
+            });
+            radarOn.innerHTML = radarH.on || "<p class='text-[7px] opacity-20'>None</p>";
+            radarDuty.innerHTML = radarH.duty || "<p class='text-[7px] opacity-20'>None</p>";
+            radarOff.innerHTML = radarH.off || "<p class='text-[7px] opacity-20'>None</p>";
+            radarBlk.innerHTML = radarH.blk || "<p class='text-[7px] opacity-20'>None</p>";
+        }
+
         onValue(ref(db, 'maamus'), (snap) => {
             maamuArray = []; let h = "";
             snap.forEach(m => {
-                let d = m.val(); d.key = m.key;
-                maamuArray.push(d);
-                h += `<div class="bg-black/40 p-3 rounded-xl mb-2 border border-white/5 italic">
-                        <div class="flex justify-between items-center">
-                            <span class="text-[10px] font-black uppercase ${d.blocked ? 'text-red-600 line-through' : 'text-white'}">${maamuArray.length}. ${d.name}</span>
-                            <div class="flex gap-4">
-                                <button onclick="toggleBlock('${d.key}', ${d.blocked || false})" class="text-[8px] uppercase font-black ${d.blocked ? 'text-green-500' : 'text-yellow-600'}">${d.blocked ? 'Unblock' : 'Block'}</button>
-                                <i onclick="remove(ref(db,'maamus/${d.key}'))" class="fa fa-trash text-red-900 text-xs cursor-pointer"></i>
-                            </div>
-                        </div>
-                      </div>`;
+                let d = m.val(); d.key = m.key; maamuArray.push(d);
+                h += `<div class="flex justify-between items-center bg-black/40 p-3 rounded-xl mb-2 border border-white/5"><span class="text-[10px] font-black uppercase ${d.blocked ? 'text-red-600 line-through' : 'text-white'}">${d.name}</span><div class="flex gap-3"><button onclick="toggleMaamuBlock('${d.key}', ${d.blocked || false})" class="text-[8px] font-black uppercase ${d.blocked ? 'text-green-500' : 'text-yellow-600'}">${d.blocked ? 'Unblock' : 'Block'}</button><i onclick="deleteMaamu('${d.key}')" class="fa fa-trash text-red-900 text-xs cursor-pointer"></i></div></div>`;
             });
             maamuDisplayList.innerHTML = h;
+            refreshRadar();
         });
 
-        window.toggleBlock = (key, currentStatus) => {
-            update(ref(db, 'maamus/' + key), { blocked: !currentStatus });
-        };
+        window.toggleMaamuBlock = (key, status) => update(ref(db, 'maamus/' + key), { blocked: !status });
+        window.deleteMaamu = (key) => { if(confirm("Maamu ಡಿಲೀಟ್ ಮಾಡಬೇಕಾ?")) remove(ref(db, 'maamus/' + key)); };
 
-        // --- 2. PARTNER APPLICATIONS (Verify/Reject) ---
-        onValue(ref(db, 'partner_applications'), (snap) => {
-            let h = "";
-            snap.forEach(c => {
-                let d = c.val(); d.key = c.key;
-                h += `<div class="bg-gray-800 p-4 rounded-[25px] mb-3 border border-blue-500/20 italic">
-                        <p class="text-xs font-black uppercase text-white mb-1">${d.name}</p>
-                        <p class="text-[9px] text-blue-400 mb-3 font-bold">${d.phone}</p>
-                        <div class="flex gap-2">
-                            <button onclick="approveMaamu('${d.key}','${d.name}','${d.phone}')" class="flex-1 bg-green-600 text-[8px] font-black py-2 rounded-xl uppercase">Verify</button>
-                            <button onclick="remove(ref(db,'partner_applications/${d.key}'))" class="flex-1 bg-red-600 text-[8px] font-black py-2 rounded-xl uppercase">Reject</button>
-                        </div>
-                      </div>`;
-            });
-            requestList.innerHTML = h || "<p class='text-center py-10 opacity-20 italic text-[10px]'>No Requests</p>";
-        });
-
-        window.approveMaamu = (key, name, phone) => {
-            push(ref(db, 'maamus'), { name, phone, blocked: false }).then(() => {
-                remove(ref(db, 'partner_applications/' + key));
-            });
-        };
-
-        // --- 3. LIVE ORDERS & HISTORY ---
         onValue(ref(db, 'bookings'), (snap) => {
-            if (!snap.exists()) return;
-            let liveHtml = ""; let historyHtml = ""; let earnings = 0; let totalJobs = 0; let currentOrderCount = 0;
-            
-            snap.forEach(child => {
-                let d = child.val(); d.key = child.key;
+            let liveHtml = ""; let historyHtml = ""; let earnings = 0; let currentLiveCount = 0;
+            bookingsArray = [];
+            snap.forEach(c => { let d = c.val(); d.key = c.key; bookingsArray.push(d); });
+            let sortedBookings = [...bookingsArray].reverse();
+            sortedBookings.forEach(d => {
                 if (lastStatusMap[d.key] && lastStatusMap[d.key] !== d.status) statusUpdateSound.play().catch(e=>{});
                 lastStatusMap[d.key] = d.status;
-
+                const details = `<div class="space-y-1 mb-3 opacity-90 text-[10px]"><p class="text-yellow-500 font-bold"><i class="fa fa-phone mr-1"></i> ${d.phone}</p><p class="text-gray-300"><i class="fa fa-map-marker-alt mr-1"></i> ${d.address}</p><p class="text-blue-400 font-black uppercase text-[9px]"><i class="fa fa-tools mr-1"></i> ${d.services}</p><p class="text-green-500 font-bold text-[9px]">Maamu: ${d.assignedTo || 'Pending'}</p></div>`;
                 if(d.status !== "Completed" && d.status !== "Cancelled") {
-                    currentOrderCount++; totalJobs++;
-                    liveHtml += `
-                    <div class="bg-gray-900 p-6 rounded-[35px] mb-4 border border-gray-800 shadow-2xl italic text-left">
-                        <div class="flex justify-between items-start mb-4">
-                            <div><h3 class="text-white font-black uppercase text-sm">${d.customer}</h3><p class="text-yellow-600 text-[10px] font-bold">${d.phone}</p></div>
-                            <span class="bg-blue-600 text-[7px] px-3 py-1 rounded-full font-black uppercase">${d.status || 'Live'}</span>
-                        </div>
-                        <p class="text-gray-300 text-[9px] mb-4 leading-tight">📍 ${d.zone || 'Udupi'}: ${d.address}</p>
-                        <button onclick="assignMaamu('${d.key}')" class="w-full bg-blue-600 text-white py-3 rounded-2xl font-black text-[10px] uppercase italic">Assign Maamu (By No.)</button>
-                    </div>`;
+                    currentLiveCount++;
+                    let overtimeClass = (d.status === 'Started' && d.startTime && (new Date().getTime() - new Date(d.startTime).getTime()) > 3600000) ? "overtime-alert" : "";
+                    let timerHtml = "";
+                    if(d.status === 'Started' && d.startTime) {
+                        const timerId = `timer-${d.key}`;
+                        setTimeout(() => runLiveTimer(d.startTime, timerId), 500);
+                        timerHtml = `<div class="mt-2 bg-black/40 p-2 rounded-xl border border-blue-500/20 flex justify-between items-center"><span class="text-[8px] text-blue-400 font-black uppercase">Live Timer:</span><span id="${timerId}" class="text-xs font-black text-white tabular-nums">0h 0m 0s</span></div>`;
+                        if(overtimeClass && !alertPlayedFor.has(d.key)) { overtimeSiren.play().catch(e=>{}); alertPlayedFor.add(d.key); }
+                    }
+                    liveHtml += `<div class="bg-gray-900 p-6 rounded-[35px] mb-4 border border-gray-800 text-left ${overtimeClass}"><div class="flex justify-between items-start mb-2"><h3 class="text-white font-black uppercase text-sm">${d.customer}</h3><div class="flex flex-col items-end gap-1"><span class="bg-blue-600 text-[7px] px-2 py-1 rounded-full uppercase font-black">${d.status || 'Pending'}</span><i onclick="deleteBooking('${d.key}')" class="fa fa-trash text-red-900 text-xs cursor-pointer"></i></div></div>${details}${timerHtml}<button onclick="assignMaamu('${d.key}')" class="w-full mt-4 bg-blue-600 py-3 rounded-2xl font-black text-[10px] uppercase italic">Assign Maamu</button></div>`;
                 } else {
                     earnings += parseInt(d.amount || 0);
-                    historyHtml += `
-                    <div class="bg-gray-900 p-5 rounded-[30px] mb-4 border border-white/10 italic text-left">
-                        <div class="flex justify-between items-center mb-3 border-b border-white/5 pb-2">
-                            <p class="text-white font-black uppercase text-[11px]">${d.customer}</p>
-                            <p class="text-green-500 font-black text-[11px]">₹${d.amount}</p>
-                        </div>
-                        <div class="space-y-1 mb-4 opacity-80 text-[9px] text-gray-300">
-                            <p><i class="fa fa-phone text-blue-500 w-4"></i> ${d.phone || 'N/A'}</p>
-                            <p><i class="fa fa-map-marker-alt text-red-500 w-4"></i> ${d.address || 'N/A'}</p>
-                            <p><i class="fa fa-tools text-orange-500 w-4"></i> ${d.services || 'N/A'}</p>
-                            <p><i class="fa fa-user text-green-500 w-4"></i> Maamu: ${d.assignedTo || 'Unknown'}</p>
-                        </div>
-                        <div class="flex gap-2">
-                            <button onclick="sendUserWA('${d.key}', '${d.phone}', '${d.customer}', '${d.amount}')" 
-                                    class="flex-1 ${d.msgSent ? 'bg-green-600' : 'bg-red-600'} text-white py-3 rounded-xl font-black uppercase text-[9px]">
-                                    ${d.msgSent ? 'Bill Sent ✅' : 'Send Bill to User'}
-                            </button>
-                            <button onclick="remove(ref(db,'bookings/${d.key}'))" class="bg-red-900/10 text-red-700 px-4 rounded-xl"><i class="fa fa-trash"></i></button>
-                        </div>
-                    </div>`;
+                    historyHtml += `<div class="bg-gray-900 p-5 rounded-[30px] mb-4 border border-white/5 text-left"><div class="flex justify-between border-b border-white/5 pb-2 mb-3"><h3 class="text-white font-black uppercase text-xs">${d.customer}</h3><div class="flex gap-3"><p class="text-green-500 font-black text-xs">₹${d.amount}</p><i onclick="deleteBooking('${d.key}')" class="fa fa-trash text-red-900 text-xs cursor-pointer"></i></div></div>${details}<button onclick="sendUserWA('${d.key}', '${d.phone}', '${d.customer}', '${d.amount}')" class="w-full ${d.msgSent ? 'bg-green-600' : 'bg-red-600'} text-white py-3 rounded-xl font-black uppercase text-[9px] italic shadow-lg">${d.msgSent ? 'Bill Sent ✅' : 'Send WhatsApp Bill'}</button></div>`;
                 }
             });
-            if (lastOrderCount !== -1 && currentOrderCount > lastOrderCount) newOrderSound.play().catch(e=>{});
-            lastOrderCount = currentOrderCount;
+            if (lastOrderCount !== -1 && currentLiveCount > lastOrderCount) newOrderSound.play().catch(e=>{});
+            lastOrderCount = currentLiveCount;
             bookingList.innerHTML = liveHtml; historyList.innerHTML = historyHtml;
-            dashEarning.innerText = "₹" + earnings; dashCount.innerText = totalJobs;
+            dashEarning.innerText = "₹" + earnings; dashCount.innerText = currentLiveCount;
+            refreshRadar();
         });
 
-        // --- 📱 ASSIGN FUNCTION (By Number) ---
+        // Other Global Functions
+        window.deleteZone = (key) => { if(confirm("Zone ಡಿಲೀಟ್ ಮಾಡಬೇಕಾ?")) remove(ref(db, 'zones/' + key)); };
+        window.deleteService = (key) => { if(confirm("Service ಡಿಲೀಟ್ ಮಾಡಬೇಕಾ?")) remove(ref(db, 'services/' + key)); };
         window.assignMaamu = (key) => {
-            onValue(ref(db, 'bookings/' + key), (snap) => {
-                const d = snap.val();
-                let options = maamuArray.map((m, i) => `${i + 1}. ${m.name} ${m.blocked ? '(BLOCKED)' : ''}`).join("\n");
-                let choice = prompt("ಮಾಮು ನಂಬರ್ ಟೈಪ್ ಮಾಡಿ:\n\n" + options);
-                
-                if(choice && maamuArray[choice-1]) {
-                    let m = maamuArray[choice-1];
-                    if(m.blocked) return alert("ಈ ಮಾಮು ಬ್ಲಾಕ್ ಆಗಿದ್ದಾರೆ!");
-                    
-                    update(ref(db, 'bookings/' + key), { status: 'Assigned', assignedTo: m.name });
-                    
-                    let msg = `*ಹೊಸ ಕೆಲಸ ಬಂದಿದೆ* 🛠️\n------------------\n*ಕಸ್ಟಮರ್ ಹೆಸರು:* ${d.customer}\n*ಫೋನ್ ನಂಬರ್:* ${d.phone}\n*ವಿಳಾಸ:* ${d.address}\n*ಲ್ಯಾಂಡ್‌ಮಾರ್ಕ್:* ${d.landmark || 'N/A'}\n*ಕೆಲಸದ ವಿವರ:* ${d.services}\n*ಕಲೆಕ್ಷನ್ ಅಮೌಂಟ್:* ರೂ.${d.amount}\n------------------\n*ಬೇಗ ಹೋಗಿ ಕೆಲಸ ಮುಗಿಸಿ!* 🏃💨\n- ಫಿಕ್ಸ್ ಮಾಮು (Fix Maamu)`;
-                    
-                    window.location.href = `whatsapp://send?phone=91${m.phone}&text=${encodeURIComponent(msg)}`;
-                }
-            }, { onlyOnce: true });
+            let opts = maamuArray.map((m, i) => `${i+1}. ${m.name} ${m.blocked ? '(BLOCKED)' : ''}`).join("\n");
+            let choice = prompt("ಮಾಮು ನಂಬರ್ ಟೈಪ್ ಮಾಡಿ:\n" + opts);
+            if(choice && maamuArray[choice-1]) {
+                let m = maamuArray[choice-1];
+                if(m.blocked) return alert("ಈ ಮಾಮು ಬ್ಲಾಕ್ ಆಗಿದ್ದಾರೆ!");
+                update(ref(db, 'bookings/' + key), { status: 'Assigned', assignedTo: m.name });
+            }
         };
-
-        // --- 🧾 SEND BILL TO USER ---
-        window.sendUserWA = (key, phone, name, amt) => {
-            const msg = `*ಕೆಲಸ ಮುಗಿದಿದೆ* ✅\n------------------\nನಮಸ್ಕಾರ *${name}* ಅವರೇ,\nನಿಮ್ಮ ಕೆಲಸ ಯಶಸ್ವಿಯಾಗಿ ಮುಗಿದಿದೆ.\n\n*ನೀವು ಪಾವತಿಸಿದ ಹಣ:* ರೂ.${amt}\n\nನಮ್ಮ ಸೇವೆ ನಿಮಗೆ ಇಷ್ಟವಾಯಿತೇ? ಮತ್ತೆ ಕೆಲಸವಿದ್ದರೆ ನಮಗೆ ತಿಳಿಸಿ!\n\n*ನಮ್ಮನ್ನು ಆಯ್ಕೆ ಮಾಡಿದ್ದಕ್ಕಾಗಿ ಧನ್ಯವಾದಗಳು!* 😊\n- ಫಿಕ್ಸ್ ಮಾಮು (Fix Maamu)`;
-            
-            update(ref(db, 'bookings/' + key), { msgSent: true }).then(() => {
-                window.location.href = `whatsapp://send?phone=91${phone}&text=${encodeURIComponent(msg)}`;
-            });
-        };
-
+        window.deleteBooking = (key) => { if(confirm("ಬುಕಿಂಗ್ ಡಿಲೀಟ್ ಮಾಡಬೇಕಾ?")) remove(ref(db, 'bookings/' + key)); };
         window.addZone = () => { if(zName.value) { push(ref(db, 'zones'), { name: zName.value }); zName.value = ""; } };
         window.addService = () => { if(sName.value && sPrice.value) { push(ref(db, 'services'), { name: sName.value, price: sPrice.value }); sName.value = ""; sPrice.value = ""; } };
-        
-        onValue(ref(db, 'zones'), snap => { let h = ""; snap.forEach(z => { h += `<div class="flex justify-between bg-black/40 p-2 rounded-lg mb-1 border border-white/5 text-[9px] uppercase"><span>${z.val().name}</span><i onclick="remove(ref(db,'zones/${z.key}'))" class="fa fa-trash text-red-900"></i></div>`; }); zoneList.innerHTML = h; });
-        onValue(ref(db, 'services'), snap => { let h = ""; snap.forEach(s => { h += `<div class="flex justify-between bg-black/40 p-2 rounded-lg mb-1 border border-white/5 text-[9px] uppercase"><span>${s.val().name}</span><i onclick="remove(ref(db,'services/${s.key}'))" class="fa fa-trash text-red-900"></i></div>`; }); serviceList.innerHTML = h; });
-
-        window.db = db; window.ref = ref; window.remove = remove;
+        window.clearAllHistory = () => { if(confirm("ಹಿಸ್ಟರಿ ಕ್ಲಿಯರ್ ಮಾಡಬೇಕಾ?")) { onValue(ref(db, 'bookings'), snap => { snap.forEach(c => { if(c.val().status === "Completed") remove(ref(db, 'bookings/' + c.key)); }); }, {onlyOnce: true}); } };
     </script>
 </head>
-<body class="bg-black text-white p-4 font-sans italic pb-28 text-center">
+<body class="p-4 text-center pb-28">
 
-    <div class="grid grid-cols-2 gap-3 mb-8 pt-4">
-        <div class="bg-gray-900 p-6 rounded-[35px] border border-gray-800 shadow-2xl">
-            <p class="text-[7px] uppercase text-gray-500 font-black mb-1">Total Earnings</p>
-            <h2 id="dashEarning" class="text-2xl font-black text-green-500 tracking-tighter">₹0</h2>
-        </div>
-        <div class="bg-gray-900 p-6 rounded-[35px] border border-gray-800 shadow-2xl">
-            <p class="text-[7px] uppercase text-gray-500 font-black mb-1">Live Jobs</p>
-            <h2 id="dashCount" class="text-2xl font-black text-yellow-500 tracking-tighter">0</h2>
+    <div class="grid grid-cols-2 gap-3 mb-8 pt-4 italic">
+        <div class="bg-gray-900 p-6 rounded-[35px] border border-gray-800 shadow-2xl"><p class="text-[7px] uppercase text-gray-500 font-black">Earnings</p><h2 id="dashEarning" class="text-2xl font-black text-green-500">₹0</h2></div>
+        <div class="bg-gray-900 p-6 rounded-[35px] border border-gray-800 shadow-2xl"><p class="text-[7px] uppercase text-gray-500 font-black">Live Jobs</p><h2 id="dashCount" class="text-2xl font-black text-yellow-500">0</h2></div>
+    </div>
+
+    <div class="flex justify-between items-center mb-10 px-2 italic">
+        <h1 class="text-xl font-black uppercase tracking-tighter">Fix Maamu Pro</h1>
+        <div class="flex gap-1">
+            <button onclick="openTab('orders')" class="w-10 h-10 bg-gray-900 rounded-xl flex items-center justify-center border border-gray-800"><i class="fa fa-bolt text-yellow-500 text-xs"></i></button>
+            <button onclick="openTab('radar')" class="w-10 h-10 bg-gray-900 rounded-xl flex items-center justify-center border border-gray-800"><i class="fa fa-satellite-dish text-green-500 text-xs"></i></button>
+            <button onclick="openTab('requests')" class="w-10 h-10 bg-gray-900 rounded-xl flex items-center justify-center border border-gray-800"><i class="fa fa-user-plus text-blue-500 text-xs"></i></button>
+            <button onclick="openTab('history')" class="w-10 h-10 bg-gray-900 rounded-xl flex items-center justify-center border border-gray-800"><i class="fa fa-history text-orange-500 text-xs"></i></button>
+            <button onclick="openTab('settings')" class="w-10 h-10 bg-gray-900 rounded-xl flex items-center justify-center border border-gray-800"><i class="fa fa-cog text-gray-500 text-xs"></i></button>
         </div>
     </div>
 
-    <div class="flex justify-between items-center mb-10 px-2">
-        <h1 class="text-xl font-black uppercase italic tracking-tighter">Fix Maamu Pro</h1>
-        <div class="flex gap-1">
-            <button onclick="openTab('orders')" class="bg-gray-900 w-10 h-10 rounded-xl flex items-center justify-center border border-gray-800"><i class="fa fa-bolt text-yellow-500 text-xs"></i></button>
-            <button onclick="openTab('requests')" class="bg-gray-900 w-10 h-10 rounded-xl flex items-center justify-center border border-gray-800"><i class="fa fa-user-plus text-blue-500 text-xs"></i></button>
-            <button onclick="openTab('history')" class="bg-gray-900 w-10 h-10 rounded-xl flex items-center justify-center border border-gray-800"><i class="fa fa-history text-green-500 text-xs"></i></button>
-            <button onclick="openTab('settings')" class="bg-gray-900 w-10 h-10 rounded-xl flex items-center justify-center border border-gray-800"><i class="fa fa-cog text-gray-500 text-xs"></i></button>
-        </div>
+    <div id="radar" class="tab-content hidden grid grid-cols-2 gap-3 px-2 italic">
+        <div class="bg-gray-900 p-4 rounded-[30px] border border-gray-800"><p class="text-[8px] font-black text-green-500 mb-3 border-b border-white/5 pb-1">ONLINE</p><div id="radarOn"></div></div>
+        <div class="bg-gray-900 p-4 rounded-[30px] border border-gray-800"><p class="text-[8px] font-black text-blue-500 mb-3 border-b border-white/5 pb-1">ON DUTY</p><div id="radarDuty"></div></div>
+        <div class="bg-gray-900 p-4 rounded-[30px] border border-gray-800"><p class="text-[8px] font-black text-zinc-500 mb-3 border-b border-white/5 pb-1">OFFLINE</p><div id="radarOff"></div></div>
+        <div class="bg-gray-900 p-4 rounded-[30px] border border-gray-800"><p class="text-[8px] font-black text-red-500 mb-3 border-b border-white/5 pb-1">BLOCKED</p><div id="radarBlk"></div></div>
     </div>
 
     <div id="orders" class="tab-content"> <div id="bookingList"></div> </div>
-    <div id="requests" class="tab-content hidden"> <div id="requestList"></div> </div>
-    <div id="history" class="tab-content hidden"> <div id="historyList"></div> </div>
+    <div id="requests" class="tab-content hidden px-2 italic text-left">
+        <p class="text-[10px] font-black uppercase mb-4 text-blue-500 border-l-2 border-blue-500 pl-2">Partner Applications</p>
+        <div id="requestList"></div>
+    </div>
+    
+    <div id="history" class="tab-content hidden px-2 italic"> 
+        <div class="flex justify-between mb-4 items-center"><p class="text-[10px] font-black uppercase text-green-500">Complete History</p><button onclick="clearAllHistory()" class="text-[8px] font-black uppercase text-red-500 bg-red-900/20 px-3 py-1 rounded-full">Clear All</button></div>
+        <div id="historyList"></div> 
+    </div>
 
-    <div id="settings" class="tab-content hidden">
-        <div class="bg-gray-900 p-6 rounded-[35px] border border-gray-800 mb-6 shadow-2xl">
-            <p class="text-[10px] font-black uppercase mb-4 text-blue-500 border-l-2 border-blue-500 pl-2">Maamu Control</p>
-            <div id="maamuDisplayList"></div>
+    <div id="settings" class="tab-content hidden text-left px-2 italic">
+        <div class="bg-gray-900 p-6 rounded-[35px] border border-red-900/30 mb-6 shadow-2xl">
+            <p class="text-[10px] font-black uppercase mb-4 text-red-500 border-l-2 border-red-500 pl-2">User Blacklist</p>
+            <div class="flex gap-2 mb-4">
+                <input id="userBlockPhone" placeholder="Mobile Number" class="flex-1 bg-black p-3 rounded-xl text-xs border border-gray-800 outline-none text-white">
+                <button onclick="toggleUserBlock()" class="bg-red-600 px-4 rounded-xl font-black text-[9px] uppercase italic">Block</button>
+            </div>
+            <div id="blockedUserList"></div>
         </div>
+
         <div class="bg-gray-900 p-6 rounded-[35px] border border-gray-800 mb-6 shadow-2xl">
-            <p class="text-[10px] font-black uppercase mb-4 text-yellow-500 border-l-2 border-yellow-500 pl-2">System Setup</p>
-            <input id="zName" placeholder="Zone Name" class="w-full bg-black p-3 rounded-xl text-xs mb-2 italic border border-gray-800 outline-none">
-            <button onclick="addZone()" class="w-full bg-gray-800 py-3 rounded-xl font-black text-[9px] uppercase mb-4">Add Zone</button>
+            <p class="text-[10px] font-black uppercase mb-4 text-blue-500 border-l-2 border-blue-500 pl-2">System Setup (Live Sync)</p>
+            <input id="zName" placeholder="Zone Name" class="w-full bg-black p-3 rounded-xl text-xs mb-2 border border-gray-800 outline-none text-white">
+            <button onclick="addZone()" class="w-full bg-gray-800 py-3 rounded-xl font-black text-[9px] uppercase mb-4 italic">Add Zone</button>
             <div id="zoneList" class="mb-6"></div>
-            <input id="sName" placeholder="Service Name" class="w-full bg-black p-3 rounded-xl text-xs mb-1 italic border border-gray-800 outline-none">
-            <input id="sPrice" placeholder="Price" class="w-full bg-black p-3 rounded-xl text-xs mb-2 italic border border-gray-800 outline-none">
+            <input id="sName" placeholder="Service Name" class="w-full bg-black p-3 rounded-xl text-xs mb-1 border border-gray-800 outline-none text-white">
+            <input id="sPrice" placeholder="Price" class="w-full bg-black p-3 rounded-xl text-xs mb-2 border border-gray-800 outline-none text-white">
             <button onclick="addService()" class="w-full bg-yellow-500 text-black py-3 rounded-xl font-black text-[9px] uppercase italic">Add Service</button>
             <div id="serviceList" class="mt-4"></div>
+        </div>
+
+        <div class="bg-gray-900 p-6 rounded-[35px] border border-gray-800 mb-6 shadow-2xl">
+            <p class="text-[10px] font-black uppercase mb-4 text-white border-l-2 border-white pl-2">Maamu Control</p>
+            <div id="maamuDisplayList"></div>
         </div>
     </div>
 </body>
